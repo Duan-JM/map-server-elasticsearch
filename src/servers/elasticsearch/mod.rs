@@ -22,18 +22,19 @@ use crate::utils::none_if_empty_string;
 use elasticsearch::Elasticsearch;
 use elasticsearch::auth::Credentials;
 use elasticsearch::cert::CertificateValidation;
-use elasticsearch::http::Url;
 use elasticsearch::http::response::Response;
+use elasticsearch::http::{StatusCode, Url};
 use http::header::USER_AGENT;
 use http::request::Parts;
 use http::{HeaderValue, header};
 use indexmap::IndexMap;
 use rmcp::RoleServer;
-use rmcp::model::ToolAnnotations;
+use rmcp::model::{CallToolResult, Content, ToolAnnotations};
 use rmcp::service::RequestContext;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_aux::field_attributes::deserialize_bool_from_anything;
+use serde_json::{Value, json};
 use std::borrow::Cow;
 use std::collections::HashMap;
 
@@ -175,7 +176,10 @@ pub enum SearchTemplate {
 pub struct ElasticsearchMcp {}
 
 impl ElasticsearchMcp {
-    pub fn new_with_config(config: ElasticsearchMcpConfig, container_mode: bool) -> anyhow::Result<base_tools::EsBaseTools> {
+    pub fn new_with_config(
+        config: ElasticsearchMcpConfig,
+        container_mode: bool,
+    ) -> anyhow::Result<base_tools::EsBaseTools> {
         let creds = if let Some(api_key) = config.api_key.clone() {
             Some(Credentials::EncodedApiKey(api_key))
         } else if let Some(username) = config.username.clone() {
@@ -224,13 +228,17 @@ impl ElasticsearchMcp {
 fn rewrite_localhost(url: &mut Url) -> anyhow::Result<()> {
     use std::net::ToSocketAddrs;
     let aliases = &[
-        "host.docker.internal", // Docker
+        "host.docker.internal",     // Docker
         "host.containers.internal", // Podman, maybe others
     ];
 
-    if let Some(host) = url.host_str() && host == "localhost" {
+    if let Some(host) = url.host_str()
+        && host == "localhost"
+    {
         for alias in aliases {
-            if let Ok(mut alias_add) = (*alias, 80).to_socket_addrs() && alias_add.next().is_some() {
+            if let Ok(mut alias_add) = (*alias, 80).to_socket_addrs()
+                && alias_add.next().is_some()
+            {
                 url.set_host(Some(alias))?;
                 tracing::info!("Container mode: using '{alias}' instead of 'localhost'");
                 return Ok(());
@@ -241,41 +249,148 @@ fn rewrite_localhost(url: &mut Url) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Map any error to an internal error of the MCP server
-pub fn internal_error(e: impl std::error::Error) -> rmcp::Error {
-    rmcp::Error::internal_error(e.to_string(), None)
+#[derive(Debug)]
+pub struct ElasticsearchToolError {
+    message: String,
+    details: Value,
 }
 
-/// Return an error as an error response to the client, which may be able to take
-/// action to correct it. This should be refined to handle common error types such
-/// as index not found, which could be caused by the client hallucinating an index name.
-///
-/// TODO (in rmcp): if rmcp::Error had a variant that accepts a CallToolResult, this would
-/// allow to use the '?' operator while sending a result to the client.
-pub fn handle_error(result: Result<Response, elasticsearch::Error>) -> Result<Response, rmcp::Error> {
-    match result {
-        Ok(resp) => resp.error_for_status_code(),
-        Err(e) => {
-            tracing::error!("Error: {:?}", &e);
-            Err(e)
+impl ElasticsearchToolError {
+    fn request(error: elasticsearch::Error) -> Self {
+        let error = error.to_string();
+        Self {
+            message: format!("Elasticsearch request failed: {error}"),
+            details: json!({
+                "kind": "request_error",
+                "error": error,
+            }),
         }
     }
-    .map_err(internal_error)
+
+    fn response(status: StatusCode, body: String) -> Self {
+        let response = parse_response_body(&body);
+        let summary = elasticsearch_error_summary(&response)
+            .or_else(|| text_summary(&body))
+            .unwrap_or_else(|| "empty response body".to_string());
+
+        Self {
+            message: format!("Elasticsearch request failed (HTTP {status}): {summary}"),
+            details: json!({
+                "kind": "elasticsearch_response_error",
+                "status": status.as_u16(),
+                "response": response,
+            }),
+        }
+    }
+
+    fn response_body(status: StatusCode, error: elasticsearch::Error) -> Self {
+        let error = error.to_string();
+        Self {
+            message: format!("Failed to read Elasticsearch response (HTTP {status}): {error}"),
+            details: json!({
+                "kind": "response_body_error",
+                "status": status.as_u16(),
+                "error": error,
+            }),
+        }
+    }
+
+    fn decode(status: StatusCode, error: serde_json::Error, body: String) -> Self {
+        let error = error.to_string();
+        Self {
+            message: format!("Failed to decode Elasticsearch response (HTTP {status}): {error}"),
+            details: json!({
+                "kind": "response_decode_error",
+                "status": status.as_u16(),
+                "error": error,
+                "response": parse_response_body(&body),
+            }),
+        }
+    }
+
+    pub fn into_call_tool_result(self) -> Result<CallToolResult, rmcp::Error> {
+        tracing::error!("{}", self.message);
+        Ok(CallToolResult::error(vec![
+            Content::text(self.message),
+            Content::json(self.details)?,
+        ]))
+    }
 }
 
 pub async fn read_json<T: DeserializeOwned>(
     response: Result<Response, elasticsearch::Error>,
-) -> Result<T, rmcp::Error> {
-    // let text = read_text(response).await?;
-    // tracing::debug!("Received json {text}");
-    // serde_json::from_str(&text).map_err(internal_error)
-
-    let response = handle_error(response)?;
-    response.json().await.map_err(internal_error)
+) -> Result<T, ElasticsearchToolError> {
+    let (status, body) = read_response(response).await?;
+    serde_json::from_str(&body).map_err(|error| ElasticsearchToolError::decode(status, error, body))
 }
 
-#[allow(dead_code)]
-pub async fn read_text(result: Result<Response, elasticsearch::Error>) -> Result<String, rmcp::Error> {
-    let response = handle_error(result)?;
-    response.text().await.map_err(internal_error)
+async fn read_response(
+    result: Result<Response, elasticsearch::Error>,
+) -> Result<(StatusCode, String), ElasticsearchToolError> {
+    let response = result.map_err(ElasticsearchToolError::request)?;
+    let status = response.status_code();
+    let body = response
+        .text()
+        .await
+        .map_err(|error| ElasticsearchToolError::response_body(status, error))?;
+
+    if !status.is_success() {
+        return Err(ElasticsearchToolError::response(status, body));
+    }
+
+    Ok((status, body))
+}
+
+fn parse_response_body(body: &str) -> Value {
+    serde_json::from_str(body).unwrap_or_else(|_| Value::String(body.to_string()))
+}
+
+fn elasticsearch_error_summary(response: &Value) -> Option<String> {
+    if let Some(error) = response.get("error") {
+        match error {
+            Value::String(message) if !message.is_empty() => return Some(message.clone()),
+            Value::Object(error) => {
+                let error_type = error.get("type").and_then(Value::as_str);
+                let reason = error.get("reason").and_then(Value::as_str).or_else(|| {
+                    error
+                        .get("root_cause")
+                        .and_then(Value::as_array)
+                        .and_then(|root_causes| root_causes.first())
+                        .and_then(|root_cause| root_cause.get("reason"))
+                        .and_then(Value::as_str)
+                });
+
+                return match (error_type, reason) {
+                    (Some(error_type), Some(reason)) => Some(format!("{error_type}: {reason}")),
+                    (Some(error_type), None) => Some(error_type.to_string()),
+                    (None, Some(reason)) => Some(reason.to_string()),
+                    (None, None) => None,
+                };
+            }
+            _ => {}
+        }
+    }
+
+    response
+        .get("message")
+        .and_then(Value::as_str)
+        .filter(|message| !message.is_empty())
+        .map(str::to_string)
+}
+
+fn text_summary(body: &str) -> Option<String> {
+    const MAX_SUMMARY_CHARS: usize = 500;
+
+    let body = body.trim();
+    if body.is_empty() {
+        return None;
+    }
+
+    let mut chars = body.chars();
+    let summary = chars.by_ref().take(MAX_SUMMARY_CHARS).collect::<String>();
+    if chars.next().is_some() {
+        Some(format!("{summary}..."))
+    } else {
+        Some(summary)
+    }
 }

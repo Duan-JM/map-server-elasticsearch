@@ -1,5 +1,10 @@
 # Elasticsearch MCP Server
 
+> [!IMPORTANT]
+> This repository is a personal fork of the official [Elastic Elasticsearch MCP Server](https://github.com/elastic/mcp-server-elasticsearch).
+> It is maintained for personal use and continues with independent optimizations and iterative improvements on top of the upstream project.
+> This fork is not affiliated with or officially supported by Elastic.
+
 > [!CAUTION]
 > This MCP server is deprecated and will only receive critical security updates going forward.
 > It has been superseded by the [Elastic Agent Builder](https://ela.st/agent-builder-docs) [MCP endpoint](https://ela.st/agent-builder-mcp), which is available in Elastic 9.2.0+ and Elasticsearch Serverless projects.

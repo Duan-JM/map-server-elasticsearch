@@ -21,7 +21,15 @@ RUN cargo build --release
 
 #--------------------------------------------------------------------------------------------------
 
-FROM cgr.dev/chainguard/wolfi-base:latest
+FROM debian:bookworm-slim
+
+RUN <<EOF
+    apt-get clean
+    apt-get update
+    apt-get install --yes --no-install-recommends ca-certificates libssl3
+    apt-get clean
+    rm -rf /var/lib/apt/lists/*
+EOF
 
 COPY --from=builder /app/target/release/elasticsearch-core-mcp-server /usr/local/bin/elasticsearch-core-mcp-server
 

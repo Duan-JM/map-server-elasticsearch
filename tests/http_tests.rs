@@ -18,6 +18,8 @@
 use anyhow::bail;
 use axum::Router;
 use axum::extract::Path;
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
 use elasticsearch_core_mcp_server::cli;
 use futures_util::StreamExt;
 use http::HeaderMap;
@@ -58,7 +60,7 @@ async fn http_tool_list() -> anyhow::Result<()> {
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
     let response = client
-        .post(url)
+        .post(&url)
         .header(CONTENT_TYPE, "application/json")
         .header(ACCEPT, "application/json, text/event-stream")
         .json(&body)
@@ -87,20 +89,36 @@ async fn end_to_end() -> anyhow::Result<()> {
     let router = Router::new().route(
         "/_cat/indices/{index}",
         axum::routing::get(async move |headers: HeaderMap, Path(index): Path<String>| {
-            // Check parameter forwarding
-            assert_eq!(index, "test-index");
             // Check API key
             assert_eq!(
                 headers.get("Authorization").unwrap().to_str().unwrap(),
                 "ApiKey value-from-the-test"
             );
+
+            if index == "missing-index" {
+                return (
+                    StatusCode::NOT_FOUND,
+                    axum::Json(json!({
+                        "error": {
+                            "type": "index_not_found_exception",
+                            "reason": "no such index [missing-index]"
+                        },
+                        "status": 404
+                    })),
+                )
+                    .into_response();
+            }
+
+            // Check parameter forwarding
+            assert_eq!(index, "test-index");
             axum::Json(json!([
-              {
-                "index": "test-index",
-                "status": "open",
-                "docs.count": "100"
-              }
+                {
+                    "index": "test-index",
+                    "status": "open",
+                    "docs.count": "100"
+                }
             ]))
+            .into_response()
         }),
     );
 
@@ -143,7 +161,7 @@ async fn end_to_end() -> anyhow::Result<()> {
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
     let response = client
-        .post(url)
+        .post(&url)
         .header(CONTENT_TYPE, "application/json")
         .header(ACCEPT, "application/json, text/event-stream")
         .header("Authorization", "ApiKey value-from-the-test")
@@ -159,6 +177,43 @@ async fn end_to_end() -> anyhow::Result<()> {
         response_body["result"]["content"][1]["text"],
         "[{\"index\":\"test-index\",\"status\":\"open\",\"docs.count\":100}]"
     );
+
+    let body = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "list_indices",
+            "arguments": {
+                "index_pattern": "missing-index"
+            }
+        }
+    });
+
+    let response = client
+        .post(url)
+        .header(CONTENT_TYPE, "application/json")
+        .header(ACCEPT, "application/json, text/event-stream")
+        .header("Authorization", "ApiKey value-from-the-test")
+        .json(&body)
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let response_body: serde_json::Value = parse_response(response).await?;
+
+    assert_eq!(response_body["result"]["isError"], true);
+    assert_eq!(
+        response_body["result"]["content"][0]["text"],
+        "Elasticsearch request failed (HTTP 404 Not Found): index_not_found_exception: no such index [missing-index]"
+    );
+
+    let details: serde_json::Value =
+        serde_json::from_str(response_body["result"]["content"][1]["text"].as_str().unwrap())?;
+    assert_eq!(details["kind"], "elasticsearch_response_error");
+    assert_eq!(details["status"], 404);
+    assert_eq!(details["response"]["error"]["type"], "index_not_found_exception");
+    assert_eq!(details["response"]["error"]["reason"], "no such index [missing-index]");
 
     Ok(())
 }

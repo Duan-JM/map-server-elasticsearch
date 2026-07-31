@@ -105,7 +105,10 @@ impl EsBaseTools {
             .send()
             .await;
 
-        let response: Vec<CatIndexResponse> = read_json(response).await?;
+        let response: Vec<CatIndexResponse> = match read_json(response).await {
+            Ok(response) => response,
+            Err(error) => return error.into_call_tool_result(),
+        };
 
         Ok(CallToolResult::success(vec![
             Content::text(format!("Found {} indices:", response.len())),
@@ -131,7 +134,10 @@ impl EsBaseTools {
             .send()
             .await;
 
-        let response: MappingResponse = read_json(response).await?;
+        let response: MappingResponse = match read_json(response).await {
+            Ok(response) => response,
+            Err(error) => return error.into_call_tool_result(),
+        };
 
         // use the first mapping (we can have many if the name is a wildcard)
         let mapping = response.values().next().unwrap();
@@ -181,7 +187,10 @@ impl EsBaseTools {
             .send()
             .await;
 
-        let response: SearchResult = read_json(response).await?;
+        let response: SearchResult = match read_json(response).await {
+            Ok(response) => response,
+            Err(error) => return error.into_call_tool_result(),
+        };
 
         let mut results: Vec<Content> = Vec::new();
 
@@ -233,7 +242,10 @@ impl EsBaseTools {
         let request = EsqlQueryRequest { query };
 
         let response = es_client.esql().query().body(request).send().await;
-        let response: EsqlQueryResponse = read_json(response).await?;
+        let response: EsqlQueryResponse = match read_json(response).await {
+            Ok(response) => response,
+            Err(error) => return error.into_call_tool_result(),
+        };
 
         // Transform response into an array of objects
         let mut objects: Vec<Value> = Vec::new();
@@ -280,7 +292,10 @@ impl EsBaseTools {
             .send()
             .await;
 
-        let response: Vec<CatShardsResponse> = read_json(response).await?;
+        let response: Vec<CatShardsResponse> = match read_json(response).await {
+            Ok(response) => response,
+            Err(error) => return error.into_call_tool_result(),
+        };
 
         Ok(CallToolResult::success(vec![
             Content::text(format!("Found {} shards:", response.len())),
