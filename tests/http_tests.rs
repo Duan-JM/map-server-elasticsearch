@@ -82,45 +82,73 @@ async fn http_tool_list() -> anyhow::Result<()> {
     Ok(())
 }
 
-// End-to-end test that spawns a mock ES server and calls the `list_indices` tool via http
+// End-to-end test that spawns a mock ES server and calls tools via http
 #[tokio::test]
 async fn end_to_end() -> anyhow::Result<()> {
-    // Start an ES mock that will reply to list_indices
-    let router = Router::new().route(
-        "/_cat/indices/{index}",
-        axum::routing::get(async move |headers: HeaderMap, Path(index): Path<String>| {
-            // Check API key
-            assert_eq!(
-                headers.get("Authorization").unwrap().to_str().unwrap(),
-                "ApiKey value-from-the-test"
-            );
+    // Start an ES mock that will reply to list_indices and get_mappings
+    let router = Router::new()
+        .route(
+            "/_cat/indices/{index}",
+            axum::routing::get(async move |headers: HeaderMap, Path(index): Path<String>| {
+                // Check API key
+                assert_eq!(
+                    headers.get("Authorization").unwrap().to_str().unwrap(),
+                    "ApiKey value-from-the-test"
+                );
 
-            if index == "missing-index" {
-                return (
-                    StatusCode::NOT_FOUND,
-                    axum::Json(json!({
-                        "error": {
-                            "type": "index_not_found_exception",
-                            "reason": "no such index [missing-index]"
-                        },
-                        "status": 404
-                    })),
-                )
-                    .into_response();
-            }
-
-            // Check parameter forwarding
-            assert_eq!(index, "test-index");
-            axum::Json(json!([
-                {
-                    "index": "test-index",
-                    "status": "open",
-                    "docs.count": "100"
+                if index == "missing-index" {
+                    return (
+                        StatusCode::NOT_FOUND,
+                        axum::Json(json!({
+                            "error": {
+                                "type": "index_not_found_exception",
+                                "reason": "no such index [missing-index]"
+                            },
+                            "status": 404
+                        })),
+                    )
+                        .into_response();
                 }
-            ]))
-            .into_response()
-        }),
-    );
+
+                // Check parameter forwarding
+                assert_eq!(index, "test-index");
+                axum::Json(json!([
+                    {
+                        "index": "test-index",
+                        "status": "open",
+                        "docs.count": "100"
+                    }
+                ]))
+                .into_response()
+            }),
+        )
+        .route(
+            "/{index}/_mapping",
+            axum::routing::get(async move |headers: HeaderMap, Path(index): Path<String>| {
+                assert_eq!(
+                    headers.get("Authorization").unwrap().to_str().unwrap(),
+                    "ApiKey value-from-the-test"
+                );
+                assert_eq!(index, "test-index");
+
+                axum::Json(json!({
+                    "test-index": {
+                        "mappings": {
+                            "properties": {
+                                "payload": {
+                                    "properties": {
+                                        "message": {
+                                            "type": "text"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }))
+                .into_response()
+            }),
+        );
 
     let listener = tokio::net::TcpListener::bind(LOCALHOST_0).await?;
 
@@ -183,6 +211,38 @@ async fn end_to_end() -> anyhow::Result<()> {
         "id": 2,
         "method": "tools/call",
         "params": {
+            "name": "get_mappings",
+            "arguments": {
+                "index": "test-index"
+            }
+        }
+    });
+
+    let response = client
+        .post(&url)
+        .header(CONTENT_TYPE, "application/json")
+        .header(ACCEPT, "application/json, text/event-stream")
+        .header("Authorization", "ApiKey value-from-the-test")
+        .json(&body)
+        .send()
+        .await?
+        .error_for_status()?;
+
+    let response_body: serde_json::Value = parse_response(response).await?;
+
+    assert_eq!(response_body["result"]["isError"], false);
+    let mapping: serde_json::Value =
+        serde_json::from_str(response_body["result"]["content"][1]["text"].as_str().unwrap())?;
+    assert_eq!(
+        mapping["mappings"]["properties"]["payload"]["properties"]["message"]["type"],
+        "text"
+    );
+
+    let body = json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {
             "name": "list_indices",
             "arguments": {
                 "index_pattern": "missing-index"
@@ -191,7 +251,7 @@ async fn end_to_end() -> anyhow::Result<()> {
     });
 
     let response = client
-        .post(url)
+        .post(&url)
         .header(CONTENT_TYPE, "application/json")
         .header(ACCEPT, "application/json, text/event-stream")
         .header("Authorization", "ApiKey value-from-the-test")
