@@ -266,7 +266,7 @@ Once connected, the MCP server provides these tools to your agent:
 - `list_indices`: List all available Elasticsearch indices
 - `get_mappings`: Get field mappings for a specific Elasticsearch index
 - `search`: Perform an Elasticsearch search using query DSL
-- `esql`: Execute an ES|QL query
+- `esql`: Execute an ES|QL pipe query (not SQL; use `FROM ... | ...`, not `SELECT`)
 - `get_shards`: Get shard information for all or specific indices
 
 Your agent can use these tools to interact with your Elasticsearch data through natural language conversations.

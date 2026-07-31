@@ -71,7 +71,8 @@ struct SearchParams {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct EsqlQueryParams {
-    /// Complete Elasticsearch ES|QL query
+    /// Complete ES|QL pipe query. This is not SQL: do not use SELECT; use source commands such as
+    /// FROM, ROW, SHOW, or TS, chain commands with |, use == for equality, and quote strings.
     query: String,
 }
 
@@ -227,8 +228,8 @@ impl EsBaseTools {
     //---------------------------------------------------------------------------------------------
     /// Tool: ES|QL
     #[tool(
-        description = "Perform an Elasticsearch ES|QL query.",
-        annotations(title = "Elasticsearch ES|QL query", read_only_hint = true)
+        description = "Execute an Elasticsearch ES|QL pipe query (not SQL). Do not use SELECT. Start with a source command such as FROM, ROW, SHOW, or TS; chain processing commands with |; use == for equality; and wrap string literals in double quotes. Example: FROM logs-* | WHERE status == \"error\" | LIMIT 10",
+        annotations(title = "Run ES|QL pipe query (not SQL)", read_only_hint = true)
     )]
     async fn esql(
         &self,

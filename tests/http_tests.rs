@@ -79,6 +79,30 @@ async fn http_tool_list() -> anyhow::Result<()> {
     assert!(names.contains(&"search"));
     assert!(names.contains(&"list_indices"));
     assert!(names.contains(&"get_mappings"));
+
+    let esql = response_body
+        .result
+        .tools
+        .iter()
+        .find(|tool| tool.name == "esql")
+        .expect("esql tool should be registered");
+    assert!(esql.description.contains("not SQL"));
+    assert!(esql.description.contains("Do not use SELECT"));
+    assert!(esql.description.contains("use == for equality"));
+    assert_eq!(
+        esql.annotations
+            .as_ref()
+            .and_then(|annotations| annotations.title.as_deref()),
+        Some("Run ES|QL pipe query (not SQL)")
+    );
+    let query_description = esql
+        .input_schema
+        .as_ref()
+        .and_then(|schema| schema.pointer("/properties/query/description"))
+        .and_then(serde_json::Value::as_str)
+        .expect("esql query parameter should have a description");
+    assert!(query_description.contains("This is not SQL"));
+    assert!(query_description.contains("do not use SELECT"));
     Ok(())
 }
 
@@ -326,6 +350,7 @@ struct ToolResult {
 struct Tool {
     name: String,
     description: String,
+    #[serde(rename = "inputSchema")]
     input_schema: Option<serde_json::Value>,
     annotations: Option<ToolAnnotations>,
 }
